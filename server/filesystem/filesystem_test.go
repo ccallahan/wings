@@ -22,36 +22,35 @@ func Test(t *testing.T) {
 		},
 	})
 
+	rootFs := afero.NewMemMapFs()
+
 	fs := New("/server", 0)
 	fs.isTest = true
 
-	aferoFs, _ := afero.NewBasePathFs(afero.NewMemMapFs(), "/server").(*afero.BasePathFs)
+	aferoFs, _ := afero.NewBasePathFs(rootFs, "/server").(*afero.BasePathFs)
 	fs.fs = aferoFs
 
 	g.Describe("Open", func() {
+		buf := &bytes.Buffer{}
+
 		g.It("opens a file if it exists on the system", func() {
 			f, err := fs.fs.Create("test.txt")
 			g.Assert(err).IsNil()
 			f.Write([]byte("testing"))
 			f.Close()
 
-			buf := &bytes.Buffer{}
 			err = fs.Open("test.txt", buf)
 			g.Assert(err).IsNil()
 			g.Assert(buf.String()).Equal("testing")
 		})
 
 		g.It("returns an error if the file does not exist", func() {
-			buf := &bytes.Buffer{}
-
 			err := fs.Open("test.txt", buf)
 			g.Assert(err).IsNotNil()
 			g.Assert(errors.Is(err, os.ErrNotExist)).IsTrue()
 		})
 
 		g.It("returns an error if the \"file\" is a directory", func() {
-			buf := &bytes.Buffer{}
-
 			err := fs.fs.Mkdir("test.txt", 0755)
 			g.Assert(err).IsNil()
 
@@ -60,7 +59,17 @@ func Test(t *testing.T) {
 			g.Assert(errors.Is(err, ErrIsDirectory)).IsTrue()
 		})
 
+		g.It("cannot open a file outside the root directory", func() {
+			_, err := rootFs.Create("test.txt")
+			g.Assert(err).IsNil()
+
+			err = fs.Open("/../test.txt", buf)
+			g.Assert(err).IsNotNil()
+			g.Assert(strings.Contains(err.Error(), "file does not exist")).IsTrue()
+		})
+
 		g.AfterEach(func() {
+			buf.Truncate(0)
 			fs.fs.RemoveAll("/")
 			fs.diskUsed = 0
 		})
