@@ -99,7 +99,7 @@ func (e *RequestError) AbortWithServerError(c *gin.Context) {
 
 // Handle specific filesystem errors for a server.
 func (e *RequestError) AbortFilesystemError(c *gin.Context) {
-	if errors.Is(e.Err, os.ErrNotExist) {
+	if errors.Is(e.Err, os.ErrNotExist) || errors.Is(e.Err, filesystem.ErrBadPathResolution) {
 		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{
 			"error": "The requested resource was not found.",
 		})

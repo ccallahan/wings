@@ -24,6 +24,7 @@ require (
 	github.com/docker/go-metrics v0.0.1 // indirect
 	github.com/docker/go-units v0.4.0 // indirect
 	github.com/fatih/color v1.9.0
+	github.com/franela/goblin v0.0.0-20200825194134-80c0062ed6cd
 	github.com/frankban/quicktest v1.10.2 // indirect
 	github.com/fsnotify/fsnotify v1.4.9 // indirect
 	github.com/gabriel-vasile/mimetype v1.1.1
@@ -62,6 +63,7 @@ require (
 	github.com/prometheus/common v0.11.1 // indirect
 	github.com/remeh/sizedwaitgroup v1.0.0
 	github.com/sabhiram/go-gitignore v0.0.0-20180611051255-d3107576ba94
+	github.com/spf13/afero v1.4.0
 	github.com/spf13/cobra v1.0.0
 	github.com/spf13/pflag v1.0.5 // indirect
 	github.com/ulikunitz/xz v0.5.7 // indirect

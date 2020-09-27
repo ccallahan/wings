@@ -2,13 +2,13 @@ package filesystem
 
 import (
 	"bufio"
-	"bytes"
 	"fmt"
 	"github.com/gabriel-vasile/mimetype"
 	"github.com/karrick/godirwalk"
 	"github.com/pkg/errors"
 	"github.com/pterodactyl/wings/config"
 	"github.com/pterodactyl/wings/system"
+	"github.com/spf13/afero"
 	"io"
 	"io/ioutil"
 	"os"
@@ -22,6 +22,7 @@ import (
 )
 
 type Filesystem struct {
+	fs                *afero.BasePathFs
 	mu                sync.RWMutex
 	lastLookupTime    *usageLookupTime
 	lookupInProgress  system.AtomicBool
@@ -32,12 +33,22 @@ type Filesystem struct {
 	diskLimit int64
 
 	// The root data directory path for this Filesystem instance.
-	root string
+	root   string
+
+	// Only here because I'm a novice and not sure the best approach to avoiding performing
+	// things that can't be wrapped by afero (e.g. Chown).
+	isTest bool
 }
 
 // Creates a new Filesystem instance for a given server.
 func New(root string, size int64) *Filesystem {
+	fs, ok := afero.NewBasePathFs(afero.NewOsFs(), root).(*afero.BasePathFs)
+	if !ok {
+		panic("creating new Filesystem instance without using BasePathFs struct")
+	}
+
 	return &Filesystem{
+		fs:                fs,
 		root:              root,
 		diskLimit:         size,
 		diskCheckInterval: time.Duration(config.Get().System.DiskCheckInterval),
@@ -53,40 +64,42 @@ func (fs *Filesystem) Path() string {
 // Reads a file on the system and returns it as a byte representation in a file
 // reader. This is not the most memory efficient usage since it will be reading the
 // entirety of the file into memory.
-func (fs *Filesystem) Readfile(p string) (io.Reader, error) {
-	cleaned, err := fs.SafePath(p)
+func (fs *Filesystem) Open(p string, w io.Writer) error {
+	st, err := fs.fs.Stat(p)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	b, err := ioutil.ReadFile(cleaned)
-	if err != nil {
-		return nil, err
+	if st.IsDir() {
+		return ErrIsDirectory
 	}
 
-	return bytes.NewReader(b), nil
+	f, err := fs.fs.Open(p)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	_, err = bufio.NewReader(f).WriteTo(w)
+
+	return err
 }
 
 // Writes a file to the system. If the file does not already exist one will be created.
 func (fs *Filesystem) Writefile(p string, r io.Reader) error {
-	cleaned, err := fs.SafePath(p)
-	if err != nil {
-		return errors.WithStack(err)
-	}
-
 	var currentSize int64
 	// If the file does not exist on the system already go ahead and create the pathway
 	// to it and an empty file. We'll then write to it later on after this completes.
-	if stat, err := os.Stat(cleaned); err != nil {
+	if stat, err := fs.fs.Stat(p); err != nil {
 		if !os.IsNotExist(err) {
 			return errors.WithStack(err)
 		}
 
-		if err := os.MkdirAll(filepath.Dir(cleaned), 0755); err != nil {
+		if err := fs.fs.MkdirAll(filepath.Dir(p), 0755); err != nil {
 			return errors.WithStack(err)
 		}
 
-		if err := fs.Chown(filepath.Dir(cleaned)); err != nil {
+		if err := fs.Chown(filepath.Dir(p)); err != nil {
 			return errors.WithStack(err)
 		}
 	} else {
@@ -105,10 +118,9 @@ func (fs *Filesystem) Writefile(p string, r io.Reader) error {
 		return err
 	}
 
-	o := &fileOpener{}
 	// This will either create the file if it does not already exist, or open and
 	// truncate the existing file.
-	file, err := o.open(cleaned, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
+	file, err := fs.openBusy(p, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
 		return errors.WithStack(err)
 	}
@@ -122,7 +134,7 @@ func (fs *Filesystem) Writefile(p string, r io.Reader) error {
 
 	// Finally, chown the file to ensure the permissions don't end up out-of-whack
 	// if we had just created it.
-	return fs.Chown(cleaned)
+	return fs.Chown(p)
 }
 
 // Creates a new directory (name) at a specified path (p) for the server.
@@ -174,9 +186,19 @@ func (fs *Filesystem) Rename(from string, to string) error {
 // go ahead and perform the chown operation. Otherwise dig deeper into the directory until
 // we've run out of directories to dig into.
 func (fs *Filesystem) Chown(path string) error {
-	cleaned, err := fs.SafePath(path)
+	// Since we need to pass off to the high-level OS calls here, we need to also return the
+	// "cleaned" path from Afero, which returns an error if the path resolution is invalid or
+	// moves outside the base directory.
+	cleaned, err := fs.fs.RealPath(path)
 	if err != nil {
-		return errors.WithStack(err)
+		return err
+	}
+
+	// Test environment uses a memory system by default, so you will just end up with
+	// a bunch of errors here most likely. We'll haver specific on-disk test cases to cover
+	// this function.
+	if fs.isTest {
+		return nil
 	}
 
 	uid := config.Get().System.User.Uid
@@ -189,7 +211,7 @@ func (fs *Filesystem) Chown(path string) error {
 
 	// If this is not a directory we can now return from the function, there is nothing
 	// left that we need to do.
-	if st, _ := os.Stat(cleaned); !st.IsDir() {
+	if st, _ := fs.fs.Stat(path); !st.IsDir() {
 		return nil
 	}
 
@@ -351,25 +373,23 @@ func (fs *Filesystem) Delete(p string) error {
 	return os.RemoveAll(resolved)
 }
 
-type fileOpener struct {
-	busy uint
-}
-
 // Attempts to open a given file up to "attempts" number of times, using a backoff. If the file
 // cannot be opened because of a "text file busy" error, we will attempt until the number of attempts
 // has been exhaused, at which point we will abort with an error.
-func (fo *fileOpener) open(path string, flags int, perm os.FileMode) (*os.File, error) {
+func (fs *Filesystem) openBusy(path string, flags int, perm os.FileMode) (afero.File, error) {
+	var busy uint
+
 	for {
-		f, err := os.OpenFile(path, flags, perm)
+		f, err := fs.fs.OpenFile(path, flags, perm)
 
 		// If there is an error because the text file is busy, go ahead and sleep for a few
 		// hundred milliseconds and then try again up to three times before just returning the
 		// error back to the caller.
 		//
 		// Based on code from: https://github.com/golang/go/issues/22220#issuecomment-336458122
-		if err != nil && fo.busy < 3 && strings.Contains(err.Error(), "text file busy") {
-			time.Sleep(100 * time.Millisecond << fo.busy)
-			fo.busy++
+		if err != nil && busy < 3 && strings.Contains(err.Error(), "text file busy") {
+			time.Sleep(100 * time.Millisecond << busy)
+			busy++
 			continue
 		}
 
