@@ -139,12 +139,7 @@ func (fs *Filesystem) Writefile(p string, r io.Reader) error {
 
 // Creates a new directory (name) at a specified path (p) for the server.
 func (fs *Filesystem) CreateDirectory(name string, p string) error {
-	cleaned, err := fs.SafePath(path.Join(p, name))
-	if err != nil {
-		return errors.WithStack(err)
-	}
-
-	return os.MkdirAll(cleaned, 0755)
+	return fs.fs.MkdirAll(filepath.Join(p, name), 0755)
 }
 
 // Moves (or renames) a file or directory.
