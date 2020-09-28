@@ -144,36 +144,27 @@ func (fs *Filesystem) CreateDirectory(name string, p string) error {
 
 // Moves (or renames) a file or directory.
 func (fs *Filesystem) Rename(from string, to string) error {
-	cleanedFrom, err := fs.SafePath(from)
-	if err != nil {
-		return errors.WithStack(err)
-	}
-
-	cleanedTo, err := fs.SafePath(to)
-	if err != nil {
-		return errors.WithStack(err)
-	}
-
 	// If the target file or directory already exists the rename function will fail, so just
 	// bail out now.
-	if _, err := os.Stat(cleanedTo); err == nil {
+	if _, err := fs.fs.Stat(to); err == nil {
 		return os.ErrExist
 	}
 
-	if cleanedTo == fs.Path() {
-		return errors.New("attempting to rename into an invalid directory space")
+	final, err := fs.fs.RealPath(to)
+	if err != nil {
+		return err
 	}
 
-	d := strings.TrimSuffix(cleanedTo, path.Base(cleanedTo))
+	d := strings.TrimSuffix(final, path.Base(final))
 	// Ensure that the directory we're moving into exists correctly on the system. Only do this if
 	// we're not at the root directory level.
 	if d != fs.Path() {
-		if mkerr := os.MkdirAll(d, 0644); mkerr != nil {
+		if mkerr := fs.fs.MkdirAll(d, 0755); mkerr != nil {
 			return errors.Wrap(mkerr, "failed to create directory structure for file rename")
 		}
 	}
 
-	return os.Rename(cleanedFrom, cleanedTo)
+	return fs.fs.Rename(from, to)
 }
 
 // Recursively iterates over a file or directory and sets the permissions on all of the
