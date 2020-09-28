@@ -415,6 +415,8 @@ func Test(t *testing.T) {
 				_, err = fs.fs.Stat(name)
 				g.Assert(err).IsNil()
 			}
+
+			g.Assert(fs.diskUsed).Equal(int64(utf8.RuneCountInString("test content")) * 3)
 		})
 
 		g.It("should create a copy inside of a directory", func() {
