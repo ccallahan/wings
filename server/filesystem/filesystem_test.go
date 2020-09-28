@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func Test(t *testing.T) {
@@ -320,6 +321,121 @@ func Test(t *testing.T) {
 
 		g.AfterEach(func() {
 			fs.fs.RemoveAll("/")
+		})
+	})
+
+	g.Describe("Copy", func() {
+		g.BeforeEach(func() {
+			f, err := fs.fs.OpenFile("source.txt", os.O_CREATE|os.O_TRUNC, 0644)
+			if err != nil {
+				panic(err)
+			}
+			defer f.Close()
+
+			_, err = f.WriteString("test content")
+			if err != nil {
+				panic(err)
+			}
+
+			fs.diskUsed = int64(utf8.RuneCountInString("test content"))
+		})
+
+		g.It("should return an error if the source does not exist", func() {
+			err := fs.Copy("foo.txt")
+			g.Assert(err).IsNotNil()
+			g.Assert(errors.Is(err, os.ErrNotExist)).IsTrue()
+		})
+
+		g.It("should return an error if the source is outside the root", func() {
+			f, err := rootFs.OpenFile("ext-source.txt", os.O_CREATE, 0644)
+			if err != nil {
+				panic(err)
+			}
+			f.Close()
+
+			err = fs.Copy("../ext-source.txt")
+			g.Assert(err).IsNotNil()
+			g.Assert(errors.Is(err, os.ErrNotExist)).IsTrue()
+		})
+
+		g.It("should return an error if the source directory is outside the root", func() {
+			f, err := rootFs.OpenFile("nested/in/dir/ext-source.txt", os.O_CREATE, 0644)
+			if err != nil {
+				panic(err)
+			}
+			f.Close()
+
+			err = fs.Copy("../nested/in/dir/ext-source.txt")
+			g.Assert(err).IsNotNil()
+			g.Assert(errors.Is(err, os.ErrNotExist)).IsTrue()
+
+			err = fs.Copy("nested/in/../../../nested/in/dir/ext-source.txt")
+			g.Assert(err).IsNotNil()
+			g.Assert(errors.Is(err, os.ErrNotExist)).IsTrue()
+		})
+
+		g.It("should return an error if the source is a directory", func() {
+			err := fs.fs.Mkdir("dir", 0755)
+			g.Assert(err).IsNil()
+
+			err = fs.Copy("dir")
+			g.Assert(err).IsNotNil()
+			g.Assert(errors.Is(err, os.ErrNotExist)).IsTrue()
+		})
+
+		g.It("should return an error if there is not space to copy the file", func() {
+			fs.diskLimit = 2
+
+			err := fs.Copy("source.txt")
+			g.Assert(err).IsNotNil()
+			g.Assert(errors.Is(err, ErrNotEnoughDiskSpace)).IsTrue()
+		})
+
+		g.It("should create a copy of the file and increment the disk used", func() {
+			err := fs.Copy("source.txt")
+			g.Assert(err).IsNil()
+
+			_, err = fs.fs.Stat("source.txt")
+			g.Assert(err).IsNil()
+
+			_, err = fs.fs.Stat("source copy.txt")
+			g.Assert(err).IsNil()
+		})
+
+		g.It("should create a copy of the file with a suffix if a copy already exists", func() {
+			err := fs.Copy("source.txt")
+			g.Assert(err).IsNil()
+
+			err = fs.Copy("source.txt")
+			g.Assert(err).IsNil()
+
+			r := []string{"source.txt", "source copy.txt", "source copy 1.txt"}
+
+			for _, name := range r {
+				_, err = fs.fs.Stat(name)
+				g.Assert(err).IsNil()
+			}
+		})
+
+		g.It("should create a copy inside of a directory", func() {
+			f, err := fs.fs.OpenFile("nested/in/dir/source.txt", os.O_CREATE|os.O_TRUNC, 0644)
+			g.Assert(err).IsNil()
+			f.Close()
+
+			err = fs.Copy("nested/in/dir/source.txt")
+			g.Assert(err).IsNil()
+
+			_, err = fs.fs.Stat("nested/in/dir/source.txt")
+			g.Assert(err).IsNil()
+
+			_, err = fs.fs.Stat("nested/in/dir/source copy.txt")
+			g.Assert(err).IsNil()
+		})
+
+		g.AfterEach(func() {
+			fs.fs.RemoveAll("/")
+			fs.diskUsed = 0
+			fs.diskLimit = 0
 		})
 	})
 }

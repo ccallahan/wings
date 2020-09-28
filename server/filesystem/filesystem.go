@@ -2,7 +2,6 @@ package filesystem
 
 import (
 	"bufio"
-	"fmt"
 	"github.com/gabriel-vasile/mimetype"
 	"github.com/karrick/godirwalk"
 	"github.com/pkg/errors"
@@ -33,7 +32,7 @@ type Filesystem struct {
 	diskLimit int64
 
 	// The root data directory path for this Filesystem instance.
-	root   string
+	root string
 
 	// Only here because I'm a novice and not sure the best approach to avoiding performing
 	// things that can't be wrapped by afero (e.g. Chown).
@@ -222,15 +221,46 @@ func (fs *Filesystem) Chown(path string) error {
 	})
 }
 
+// Begin looping up to 50 times to try and create a unique copy file name. This will take
+// an input of "file.txt" and generate "file copy.txt". If that name is already taken, it will
+// then try to write "file copy 2.txt" and so on, until reaching 50 loops. At that point we
+// won't waste anymore time, just use the current timestamp and make that copy.
+//
+// Could probably make this more efficient by checking if there are any files matching the copy
+// pattern, and trying to find the highest number and then incrementing it by one rather than
+// looping endlessly.
+func (fs *Filesystem) findCopySuffix(dir string, name string, extension string) (string, error) {
+	var i int
+	var suffix = " copy"
+
+	for i = 0; i < 51; i++ {
+		if i > 0 {
+			suffix = " copy " + strconv.Itoa(i)
+		}
+
+		n := name + suffix + extension
+		// If we stat the file and it does not exist that means we're good to create the copy. If it
+		// does exist, we'll just continue to the next loop and try again.
+		if _, err := fs.fs.Stat(path.Join(dir, n)); err != nil {
+			if !os.IsNotExist(err) {
+				return "", err
+			}
+
+			break
+		}
+
+		if i == 50 {
+			suffix = "copy." + time.Now().Format(time.RFC3339)
+		}
+	}
+
+	return name + suffix + extension, nil
+}
+
 // Copies a given file to the same location and appends a suffix to the file to indicate that
 // it has been copied.
 func (fs *Filesystem) Copy(p string) error {
-	cleaned, err := fs.SafePath(p)
-	if err != nil {
-		return errors.WithStack(err)
-	}
-
-	s, err := os.Stat(cleaned)
+	s, err := fs.fs.Stat(p)
 	if err != nil {
 		return errors.WithStack(err)
 	} else if s.IsDir() || !s.Mode().IsRegular() {
@@ -244,8 +274,8 @@ func (fs *Filesystem) Copy(p string) error {
 		return err
 	}
 
-	base := filepath.Base(cleaned)
-	relative := strings.TrimSuffix(strings.TrimPrefix(cleaned, fs.Path()), base)
+	base := filepath.Base(filepath.Clean(p))
+	relative := strings.TrimSuffix(strings.TrimPrefix(filepath.Clean(p), fs.Path()), base)
 	extension := filepath.Ext(base)
 	name := strings.TrimSuffix(base, extension)
 
@@ -257,51 +287,14 @@ func (fs *Filesystem) Copy(p string) error {
 		name = strings.TrimSuffix(name, ".tar")
 	}
 
-	// Begin looping up to 50 times to try and create a unique copy file name. This will take
-	// an input of "file.txt" and generate "file copy.txt". If that name is already taken, it will
-	// then try to write "file copy 2.txt" and so on, until reaching 50 loops. At that point we
-	// won't waste anymore time, just use the current timestamp and make that copy.
-	//
-	// Could probably make this more efficient by checking if there are any files matching the copy
-	// pattern, and trying to find the highest number and then incrementing it by one rather than
-	// looping endlessly.
-	var i int
-	copySuffix := " copy"
-	for i = 0; i < 51; i++ {
-		if i > 0 {
-			copySuffix = " copy " + strconv.Itoa(i)
-		}
-
-		tryName := fmt.Sprintf("%s%s%s", name, copySuffix, extension)
-		tryLocation, err := fs.SafePath(path.Join(relative, tryName))
-		if err != nil {
-			return errors.WithStack(err)
-		}
-
-		// If the file exists, continue to the next loop, otherwise we're good to start a copy.
-		if _, err := os.Stat(tryLocation); err != nil && !os.IsNotExist(err) {
-			return errors.WithStack(err)
-		} else if os.IsNotExist(err) {
-			break
-		}
-
-		if i == 50 {
-			copySuffix = "." + time.Now().Format(time.RFC3339)
-		}
-	}
-
-	finalPath, err := fs.SafePath(path.Join(relative, fmt.Sprintf("%s%s%s", name, copySuffix, extension)))
-	if err != nil {
-		return errors.WithStack(err)
-	}
-
-	source, err := os.Open(cleaned)
+	source, err := fs.fs.Open(p)
 	if err != nil {
 		return errors.WithStack(err)
 	}
 	defer source.Close()
 
-	dest, err := os.Create(finalPath)
+	n, err := fs.findCopySuffix(relative, name, extension)
+	dest, err := fs.fs.Create(path.Join(relative, n))
 	if err != nil {
 		return errors.WithStack(err)
 	}
