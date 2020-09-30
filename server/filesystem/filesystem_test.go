@@ -6,12 +6,30 @@ import (
 	. "github.com/franela/goblin"
 	"github.com/pterodactyl/wings/config"
 	"github.com/spf13/afero"
+	"io/ioutil"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
 )
+
+type rootFs struct {
+	fs afero.Fs
+}
+
+func (rfs *rootFs) reset() {
+	if err := rfs.fs.RemoveAll("server"); err != nil {
+		if !os.IsNotExist(err) {
+			panic(err)
+		}
+	}
+
+	if err := rfs.fs.Mkdir("server", 0755); err != nil {
+		panic(err)
+	}
+}
 
 func Test(t *testing.T) {
 	g := Goblin(t)
@@ -24,17 +42,24 @@ func Test(t *testing.T) {
 		},
 	})
 
-	rootFs := afero.NewMemMapFs()
+	tmpDir, err := ioutil.TempDir(os.TempDir(), "pterodactyl")
+	if err != nil {
+		panic(err)
+	}
+	// defer os.RemoveAll(tmpDir)
 
-	fs := New("/server", 0)
+	rfs := rootFs{
+		fs: afero.NewBasePathFs(afero.NewOsFs(), tmpDir),
+	}
+
+	rfs.reset()
+
+	fs := New(filepath.Join(tmpDir, "/server"), 0)
 	fs.isTest = true
-
-	aferoFs, _ := afero.NewBasePathFs(rootFs, "/server").(*afero.BasePathFs)
-	fs.fs = aferoFs
 
 	g.Describe("Path", func() {
 		g.It("returns the root path for the instance", func() {
-			g.Assert(fs.Path()).Equal("/server")
+			g.Assert(fs.Path()).Equal(filepath.Join(tmpDir, "/server"))
 		})
 	})
 
@@ -68,7 +93,7 @@ func Test(t *testing.T) {
 		})
 
 		g.It("cannot open a file outside the root directory", func() {
-			_, err := rootFs.Create("test.txt")
+			_, err := rfs.fs.Create("test.txt")
 			g.Assert(err).IsNil()
 
 			err = fs.Open("/../test.txt", buf)
@@ -78,8 +103,8 @@ func Test(t *testing.T) {
 
 		g.AfterEach(func() {
 			buf.Truncate(0)
-			fs.fs.RemoveAll("/")
 			fs.diskUsed = 0
+			rfs.reset()
 		})
 	})
 
@@ -184,7 +209,7 @@ func Test(t *testing.T) {
 
 		g.AfterEach(func() {
 			buf.Truncate(0)
-			fs.fs.RemoveAll("/")
+			rfs.reset()
 			fs.diskUsed = 0
 			fs.diskLimit = 0
 		})
@@ -224,13 +249,13 @@ func Test(t *testing.T) {
 		})
 
 		g.AfterEach(func() {
-			fs.fs.RemoveAll("/")
+			rfs.reset()
 		})
 	})
 
 	g.Describe("Rename", func() {
 		g.BeforeEach(func() {
-			f, err := fs.fs.OpenFile("source.txt", os.O_CREATE|os.O_TRUNC, 0644)
+			f, err := fs.fs.OpenFile("source.txt", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 			if err != nil {
 				panic(err)
 			}
@@ -256,6 +281,12 @@ func Test(t *testing.T) {
 			g.Assert(errors.Is(err, os.ErrExist)).IsTrue()
 		})
 
+		g.It("returns an error if the source destination is the root directory", func() {
+			err := fs.Rename("source.txt", "/")
+			g.Assert(err).IsNotNil()
+			g.Assert(errors.Is(err, os.ErrExist)).IsTrue()
+		})
+
 		g.It("does not allow renaming to a location outside the root", func() {
 			err := fs.Rename("source.txt", "../target.txt")
 			g.Assert(err).IsNotNil()
@@ -263,7 +294,7 @@ func Test(t *testing.T) {
 		})
 
 		g.It("does not allow renaming from a location outside the root", func() {
-			f, err := rootFs.OpenFile("ext-source.txt", os.O_CREATE, 0644)
+			f, err := rfs.fs.OpenFile("ext-source.txt", os.O_CREATE, 0644)
 			if err != nil {
 				panic(err)
 			}
@@ -320,13 +351,13 @@ func Test(t *testing.T) {
 		})
 
 		g.AfterEach(func() {
-			fs.fs.RemoveAll("/")
+			rfs.reset()
 		})
 	})
 
 	g.Describe("Copy", func() {
 		g.BeforeEach(func() {
-			f, err := fs.fs.OpenFile("source.txt", os.O_CREATE|os.O_TRUNC, 0644)
+			f, err := fs.fs.OpenFile("source.txt", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 			if err != nil {
 				panic(err)
 			}
@@ -347,10 +378,8 @@ func Test(t *testing.T) {
 		})
 
 		g.It("should return an error if the source is outside the root", func() {
-			f, err := rootFs.OpenFile("ext-source.txt", os.O_CREATE, 0644)
-			if err != nil {
-				panic(err)
-			}
+			f, err := rfs.fs.OpenFile("ext-source.txt", os.O_CREATE, 0644)
+			g.Assert(err).IsNil()
 			f.Close()
 
 			err = fs.Copy("../ext-source.txt")
@@ -359,10 +388,11 @@ func Test(t *testing.T) {
 		})
 
 		g.It("should return an error if the source directory is outside the root", func() {
-			f, err := rootFs.OpenFile("nested/in/dir/ext-source.txt", os.O_CREATE, 0644)
-			if err != nil {
-				panic(err)
-			}
+			rfs.fs.MkdirAll("nested/in/dir", 0755)
+			g.Assert(err).IsNil()
+
+			f, err := rfs.fs.OpenFile("nested/in/dir/ext-source.txt", os.O_CREATE, 0644)
+			g.Assert(err).IsNil()
 			f.Close()
 
 			err = fs.Copy("../nested/in/dir/ext-source.txt")
@@ -420,6 +450,9 @@ func Test(t *testing.T) {
 		})
 
 		g.It("should create a copy inside of a directory", func() {
+			err := fs.fs.MkdirAll("nested/in/dir", 0755)
+			g.Assert(err).IsNil()
+
 			f, err := fs.fs.OpenFile("nested/in/dir/source.txt", os.O_CREATE|os.O_TRUNC, 0644)
 			g.Assert(err).IsNil()
 			f.Close()
@@ -435,7 +468,100 @@ func Test(t *testing.T) {
 		})
 
 		g.AfterEach(func() {
-			fs.fs.RemoveAll("/")
+			rfs.reset()
+			fs.diskUsed = 0
+			fs.diskLimit = 0
+		})
+	})
+
+	g.Describe("Delete", func() {
+		g.BeforeEach(func() {
+			f, err := fs.fs.OpenFile("source.txt", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+			if err != nil {
+				panic(err)
+			}
+			defer f.Close()
+
+			_, err = f.WriteString("test content")
+			if err != nil {
+				panic(err)
+			}
+
+			fs.diskUsed = int64(utf8.RuneCountInString("test content"))
+		})
+
+		g.It("does not delete files outside the root directory", func() {
+			f, err := rfs.fs.OpenFile("ext-source.txt", os.O_CREATE, 0644)
+			if err != nil {
+				panic(err)
+			}
+			f.Close()
+
+			err = fs.Delete("../ext-source.txt")
+			g.Assert(err).IsNotNil()
+			g.Assert(errors.Is(err, os.ErrNotExist)).IsTrue()
+		})
+
+		g.It("does not allow the deletion of the root directory", func() {
+			err := fs.Delete("/")
+			g.Assert(err).IsNotNil()
+			g.Assert(err.Error()).Equal("cannot delete root server directory")
+		})
+
+		g.It("does not return an error if the target does not exist", func() {
+			err := fs.Delete("missing.txt")
+			g.Assert(err).IsNil()
+
+			st, err := fs.fs.Stat("source.txt")
+			g.Assert(err).IsNil()
+			g.Assert(st.Name()).Equal("source.txt")
+		})
+
+		g.It("deletes files and subtracts their size from the disk usage", func() {
+			err := fs.Delete("source.txt")
+			g.Assert(err).IsNil()
+
+			_, err = fs.fs.Stat("source.txt")
+			g.Assert(err).IsNotNil()
+			g.Assert(errors.Is(err, os.ErrNotExist)).IsTrue()
+
+			g.Assert(fs.diskUsed).Equal(int64(0))
+		})
+
+		g.It("deletes all items inside a directory if the directory is deleted", func() {
+			sources := []string{
+				"foo/source.txt",
+				"foo/bar/source.txt",
+				"foo/bar/baz/source.txt",
+			}
+
+			err := fs.fs.MkdirAll("foo/bar/baz", 0755)
+			g.Assert(err).IsNil()
+
+			for _, s := range sources {
+				f, err := fs.fs.OpenFile(s, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+				g.Assert(err).IsNil()
+
+				_, err = f.WriteString("test content")
+				g.Assert(err).IsNil()
+				f.Close()
+			}
+
+			fs.diskUsed = int64(utf8.RuneCountInString("test content") * 3)
+
+			err = fs.Delete("foo")
+			g.Assert(err).IsNil()
+			g.Assert(fs.diskUsed).Equal(int64(0))
+
+			for _, s := range sources {
+				_, err = fs.fs.Stat(s)
+				g.Assert(err).IsNotNil()
+				g.Assert(errors.Is(err, os.ErrNotExist)).IsTrue()
+			}
+		})
+
+		g.AfterEach(func() {
+			rfs.reset()
 			fs.diskUsed = 0
 			fs.diskLimit = 0
 		})
