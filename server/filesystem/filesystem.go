@@ -144,17 +144,24 @@ func (fs *Filesystem) CreateDirectory(name string, p string) error {
 // Moves (or renames) a file or directory.
 func (fs *Filesystem) Rename(from string, to string) error {
 	// If the target file or directory already exists the rename function will fail, so just
-	// bail out now.
+	// bail out now. This will also prevent someone from attempting to rename TO the root directory.
 	if _, err := fs.fs.Stat(to); err == nil {
 		return os.ErrExist
 	}
 
-	final, err := fs.fs.RealPath(to)
-	if err != nil {
+	// This logic exists to prevent someone from renaming FROM the root directory to something else.
+	// The RealPath call will also return an error if they're escaping, but we're less concerned with
+	// that here since that would be blocked in other calls.
+	//
+	// However, it does need to confirm that the final resolved destination is not just the root. If
+	// it is the root
+	if final, err := fs.fs.RealPath(to); err != nil {
 		return err
+	} else if final == fs.Path() {
+		return os.ErrExist
 	}
 
-	d := strings.TrimSuffix(final, path.Base(final))
+	d := strings.TrimSuffix(filepath.Clean(to), filepath.Base(to))
 	// Ensure that the directory we're moving into exists correctly on the system. Only do this if
 	// we're not at the root directory level.
 	if d != fs.Path() {
@@ -163,7 +170,7 @@ func (fs *Filesystem) Rename(from string, to string) error {
 		}
 	}
 
-	return fs.fs.Rename(from, to)
+	return errors.WithStack(fs.fs.Rename(from, to))
 }
 
 // Recursively iterates over a file or directory and sets the permissions on all of the
@@ -314,6 +321,11 @@ func (fs *Filesystem) Copy(p string) error {
 // Deletes a file or folder from the system. Prevents the user from accidentally
 // (or maliciously) removing their root server data directory.
 func (fs *Filesystem) Delete(p string) error {
+	wg := sync.WaitGroup{}
+	// TODO(dane): do we still need this with the new virtual filesystem thing here? Maybe?
+	// This is not a security concern at least, worst case you just can't remove certain symlinked
+	// files from your server, which is unlikely to be a common scenario.
+	//
 	// This is one of the few (only?) places in the codebase where we're explicitly not using
 	// the SafePath functionality when working with user provided input. If we did, you would
 	// not be able to delete a file that is a symlink pointing to a location outside of the data
@@ -323,9 +335,13 @@ func (fs *Filesystem) Delete(p string) error {
 	// deleting the actual source file for the symlink rather than the symlink itself. For these
 	// purposes just resolve the actual file path using filepath.Join() and confirm that the path
 	// exists within the data directory.
-	resolved := fs.unsafeFilePath(p)
-	if !fs.unsafeIsInDataDirectory(resolved) {
-		return ErrBadPathResolution
+	// resolved := fs.unsafeFilePath(p)
+	// if !fs.unsafeIsInDataDirectory(resolved) {
+	// 	return ErrBadPathResolution
+	// }
+	resolved, err := fs.fs.RealPath(p)
+	if err != nil {
+		return err
 	}
 
 	// Block any whoopsies.
@@ -333,23 +349,31 @@ func (fs *Filesystem) Delete(p string) error {
 		return errors.New("cannot delete root server directory")
 	}
 
-	if st, err := os.Stat(resolved); err != nil {
-		if !os.IsNotExist(err) {
-			fs.error(err).Warn("error while attempting to stat file before deletion")
+	if st, err := fs.fs.Stat(p); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
 		}
+
+		return errors.WithStack(err)
 	} else {
 		if !st.IsDir() {
 			fs.addDisk(-st.Size())
 		} else {
-			go func(st os.FileInfo, resolved string) {
-				if s, err := fs.DirectorySize(resolved); err == nil {
+			wg.Add(1)
+			go func(wg *sync.WaitGroup, st os.FileInfo, p string) {
+				defer func() {
+					wg.Done()
+				}()
+				if s, err := fs.DirectorySize(p); err == nil {
 					fs.addDisk(-s)
 				}
-			}(st, resolved)
+			}(&wg, st, p)
 		}
 	}
 
-	return os.RemoveAll(resolved)
+	wg.Wait()
+
+	return fs.fs.RemoveAll(p)
 }
 
 // Attempts to open a given file up to "attempts" number of times, using a backoff. If the file

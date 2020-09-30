@@ -141,7 +141,7 @@ func (fs *Filesystem) updateCachedDiskUsage() (int64, error) {
 // through all of the folders. Returns the size in bytes. This can be a fairly taxing operation
 // on locations with tons of files, so it is recommended that you cache the output.
 func (fs *Filesystem) DirectorySize(dir string) (int64, error) {
-	d, err := fs.SafePath(dir)
+	d, err := fs.fs.RealPath(dir)
 	if err != nil {
 		return 0, errors.WithStack(err)
 	}
@@ -199,7 +199,18 @@ func (fs *Filesystem) hasSpaceFor(size int64) error {
 
 // Updates the disk usage for the Filesystem instance.
 func (fs *Filesystem) addDisk(i int64) int64 {
-	size, _ := fs.DiskUsage(true)
+	var size = atomic.LoadInt64(&fs.diskUsed)
+	// Sorry go gods. This is ugly but the best approach I can come up with for right
+	// now without completely re-evaluating the logic we use for determining disk space.
+	//
+	// Normally I would just be using the atomic load right below, but I'm not sure about
+	// the scenarios where it is 0 because nothing has run that would trigger a disk size
+	// calculation?
+	//
+	// Perhaps that isn't even a concern for the sake of this?
+	if !fs.isTest {
+		size, _ = fs.DiskUsage(true)
+	}
 
 	// If we're dropping below 0 somehow just cap it to 0.
 	if (size + i) < 0 {
